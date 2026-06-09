@@ -1,0 +1,17 @@
+{
+  "name": "Voltek Sales Management System",
+  "short_name": "Voltek Sales",
+  "description": "Track the Voltek sales & account flow, commissions and approvals.",
+  "id": "/",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#15191e",
+  "theme_color": "#15191e",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
