@@ -150,6 +150,8 @@
   .badge.confirmed{background:rgba(63,174,111,.18);color:#3fae6f}
   .badge.counted{background:rgba(239,108,46,.18);color:var(--accent)}
   .badge.pending{background:var(--chip-bg);color:var(--muted)}
+  .badge.excluded{background:rgba(197,70,60,.20);color:#ff8d7a}
+  table.dash tr.total-row td{border-top:2px solid var(--line);background:var(--panel-2)}
   .stat.top{border-color:var(--accent);background:linear-gradient(135deg,rgba(239,108,46,.14),transparent 65%),var(--panel)}
   .stat.top.hero{
     grid-column:1 / -1;
@@ -478,7 +480,7 @@
       </div>
       <div class="dash-cards" id="dashTotals"></div>
       <div id="dashTableWrap"></div>
-      <p class="dash-note">Commission is counted once the <b>Transfer Slip (RM 1k Booking)</b> step is done, and confirmed when <b>Commission Successful</b> is ticked.</p>
+      <p class="dash-note">Commission is counted once the <b>Transfer Slip (RM 1k Booking)</b> step is done <b>within the salesperson's contract period</b>, and confirmed when <b>Commission Successful</b> is ticked. Bookings made after a contract expires are not counted until the contract is renewed. Monthly history is recorded automatically from each booking's completion date.</p>
     </div>
 
     <!-- SALES LIST -->
@@ -719,9 +721,9 @@ async function loadDashboard(){
   const wrap=$("#dashTableWrap"); wrap.innerHTML="<div class='empty'>Loading…</div>";
   const tot=$("#dashTotals"); tot.innerHTML="";
   const [uRes,pRes,sRes] = await Promise.all([
-    sb.from("users").select("username,role").eq("role","sales"),
+    sb.from("users").select("username,role,contract_start,contract_end").eq("role","sales"),
     sb.from("projects").select("*"),
-    sb.from("step_progress").select("project_id,step_no,done"),
+    sb.from("step_progress").select("project_id,step_no,done,done_at,updated_at"),
   ]);
   const firstErr = uRes.error || pRes.error || sRes.error;
   if(firstErr){
@@ -730,23 +732,49 @@ async function loadDashboard(){
   }
   const users=uRes.data||[], projects=pRes.data||[], prog=sRes.data||[];
   const doneSet = {}; // project_id -> Set of done step_no
-  prog.forEach(r=>{ if(r.done){ (doneSet[r.project_id]=doneSet[r.project_id]||new Set()).add(r.step_no); }});
+  const bookDate = {}; // project_id -> YYYY-MM-DD of booking-step completion
+  prog.forEach(r=>{
+    if(r.done){
+      (doneSet[r.project_id]=doneSet[r.project_id]||new Set()).add(r.step_no);
+      if(r.step_no===BOOKING_STEP) bookDate[r.project_id]=(r.done_at||r.updated_at||"").slice(0,10);
+    }
+  });
 
   const salesSet = new Set(users.map(u=>u.username)); // sales-role users only
+  const contractOf = {}; users.forEach(u=>{ contractOf[u.username]={start:u.contract_start,end:u.contract_end}; });
+  // a booking's commission counts only if it was booked within the salesperson's contract window
+  function eligibleBooking(p){
+    const d = bookDate[p.id];
+    if(!d) return false;                        // not booked yet
+    const c = contractOf[p.created_by];
+    if(!c || !c.end) return true;               // no contract dates set → not restricted
+    if(c.start && d < c.start) return false;
+    return d <= c.end;                          // renewal extends end → booking counts again
+  }
+
   const rows = {}; // username -> {counted, countedComm, confirmed, confirmedComm} — leaderboard, sales users only
   users.forEach(u=>{ rows[u.username]={counted:0,countedComm:0,confirmed:0,confirmedComm:0}; });
 
-  let tCounted=0,tComm=0,tConf=0; // company totals include every sale
+  let tCounted=0,tComm=0,tConf=0; // company totals (eligible bookings only)
+  const monthly = {}; // 'YYYY-MM' -> {count, comm}
   projects.forEach(p=>{
     const who=p.created_by||"—";
     const ds=doneSet[p.id]||new Set();
     const comm=Number(p.commission)||0;
-    if(ds.has(BOOKING_STEP)){ tCounted++; tComm+=comm; }
+    const elig = eligibleBooking(p);
+    if(elig){
+      tCounted++; tComm+=comm;
+      const mk=(bookDate[p.id]||"").slice(0,7);
+      if(mk){ (monthly[mk]=monthly[mk]||{count:0,comm:0}); monthly[mk].count++; monthly[mk].comm+=comm; }
+    }
     if(ds.has(FINAL_STEP)){ tConf++; }
     if(!salesSet.has(who)) return; // admins/others excluded from leaderboard
-    if(ds.has(BOOKING_STEP)){ rows[who].counted++; rows[who].countedComm+=comm; }
+    if(elig){ rows[who].counted++; rows[who].countedComm+=comm; }
     if(ds.has(FINAL_STEP)){ rows[who].confirmed++; rows[who].confirmedComm+=comm; }
   });
+
+  const thisMonthKey = new Date().toISOString().slice(0,7);
+  const thisMonth = monthly[thisMonthKey] || {count:0, comm:0};
 
   const names=Object.keys(rows).sort((a,b)=>
     (rows[b].countedComm-rows[a].countedComm) || (rows[b].counted-rows[a].counted));
@@ -755,8 +783,9 @@ async function loadDashboard(){
   const stat=(k,v,accent)=>`<div class="stat"><div class="k">${k}</div><div class="v ${accent?'accent':''}">${v}</div></div>`;
   tot.innerHTML =
     (leader ? `<div class="stat top hero"><div class="k">🏆 TOP PERFORMER</div><div class="v">${escapeHtml(leader)}</div><div class="sub">RM ${rows[leader].countedComm.toLocaleString()} commission · ${rows[leader].counted} sale${rows[leader].counted===1?"":"s"} counted</div></div>` : "") +
+    stat("This month", "RM "+thisMonth.comm.toLocaleString(), true) +
+    stat("Total commission", "RM "+tComm.toLocaleString(), true) +
     stat("Sales counted", tCounted) +
-    stat("Commission counted", "RM "+tComm.toLocaleString(), true) +
     stat("Commission confirmed", tConf+" sales");
 
   wrap.innerHTML="";
@@ -836,22 +865,47 @@ async function loadDashboard(){
     wrap.appendChild(el("div","empty","No sales users yet."));
   }
 
+  // ---- monthly commission history (archive) ----
+  const monthKeys = Object.keys(monthly).sort().reverse();
+  if(monthKeys.length){
+    wrap.appendChild(el("div","dash-subhead","🗓 Monthly commission history"));
+    const tm=el("table","dash");
+    tm.innerHTML="<tr><th>Month</th><th class='num'>Sales counted</th><th class='num'>Commission (RM)</th></tr>";
+    const fmtMonth=k=>{ const [y,m]=k.split("-"); return new Date(y, m-1, 1).toLocaleString(undefined,{month:"long",year:"numeric"}); };
+    monthKeys.forEach(k=>{
+      const m=monthly[k];
+      const tr=el("tr"); if(k===thisMonthKey) tr.className="leader";
+      tr.innerHTML=`<td>${fmtMonth(k)}${k===thisMonthKey?" <span class='badge counted'>current</span>":""}</td>
+        <td class="num">${m.count}</td>
+        <td class="num">${m.comm.toLocaleString()}</td>`;
+      tm.appendChild(tr);
+    });
+    const trTot=el("tr"); trTot.className="total-row";
+    trTot.innerHTML=`<td><b>Total (all time)</b></td><td class="num"><b>${tCounted}</b></td><td class="num"><b>${tComm.toLocaleString()}</b></td>`;
+    tm.appendChild(trTot);
+    wrap.appendChild(scrollWrap(tm));
+  }
+
   // ---- per-sale breakdown ----
   if(projects.length){
     wrap.appendChild(el("div","dash-subhead","Per-sale breakdown"));
     const t2=el("table","dash");
-    t2.innerHTML="<tr><th>Customer</th><th>Salesperson</th><th class='num'>Commission (RM)</th><th>Status</th></tr>";
+    t2.innerHTML="<tr><th>Customer</th><th>Salesperson</th><th class='num'>Commission (RM)</th><th>Month</th><th>Status</th></tr>";
     projects.slice().sort((a,b)=>(b.created_at||"").localeCompare(a.created_at||"")).forEach(p=>{
       const ds=doneSet[p.id]||new Set();
       const comm=Number(p.commission)||0;
+      const booked=ds.has(BOOKING_STEP);
+      const elig=eligibleBooking(p);
       let status, cls;
       if(ds.has(FINAL_STEP)){ status="Confirmed"; cls="badge confirmed"; }
-      else if(ds.has(BOOKING_STEP)){ status="Counted"; cls="badge counted"; }
+      else if(booked && elig){ status="Counted"; cls="badge counted"; }
+      else if(booked && !elig){ status="Not counted · contract"; cls="badge excluded"; }
       else { status="In progress"; cls="badge pending"; }
       const tr=el("tr");
       tr.innerHTML=`<td>${escapeHtml(p.name||p.customer||"—")}</td>
         <td>${escapeHtml(p.created_by||"—")}</td>
         <td class="num">${comm.toLocaleString()}</td>
+        <td>${bookDate[p.id]?bookDate[p.id].slice(0,7):"—"}</td>
         <td><span class="${cls}">${status}</span></td>`;
       t2.appendChild(tr);
     });
@@ -1086,8 +1140,28 @@ async function upsertProgress(step_no, patch){
   PROGRESS[step_no] = data;
   return data;
 }
+async function contractAllowsCommission(){
+  const who = CURRENT_PROJECT && CURRENT_PROJECT.created_by;
+  if(!who) return true;
+  try{
+    const {data} = await sb.from("users").select("role,contract_end").eq("username", who).limit(1);
+    const u=(data||[])[0];
+    if(!u || u.role!=="sales" || !u.contract_end) return true; // no contract set → not blocked
+    const today = new Date().toISOString().slice(0,10);
+    return today <= u.contract_end;
+  }catch(e){ return true; }
+}
 async function toggleDone(step_no, val){
-  const r = await upsertProgress(step_no, {done:val});
+  if(val && step_no===FINAL_STEP){
+    const ok = await contractAllowsCommission();
+    if(!ok){
+      toast("Cannot confirm commission — "+(CURRENT_PROJECT.created_by||"the salesperson")+"'s contract has expired. Renew the contract first.", true);
+      renderTimeline();
+      return;
+    }
+  }
+  const patch = {done:val, done_at: val ? new Date().toISOString() : null};
+  const r = await upsertProgress(step_no, patch);
   if(r){ toast(val?"Marked done":"Marked not done"); if(val) maybeNotifyNext(step_no); renderTimeline(val);
     if(step_no===BOOKING_STEP||step_no===FINAL_STEP){/* affects dashboard */} }
 }
@@ -1100,7 +1174,10 @@ async function handleUpload(step_no, file){
   const {error:upErr} = await sb.storage.from(BUCKET).upload(path, file, {upsert:true, contentType:file.type});
   if(upErr){ toast("Upload failed: "+upErr.message, true); return; }
   const {data:pub} = sb.storage.from(BUCKET).getPublicUrl(path);
-  const r = await upsertProgress(step_no, {done:true, file_url:pub.publicUrl, file_name:file.name});
+  const alreadyDone = PROGRESS[step_no] && PROGRESS[step_no].done;
+  const patch = {done:true, file_url:pub.publicUrl, file_name:file.name};
+  if(!alreadyDone) patch.done_at = new Date().toISOString(); // keep original month if replacing a file
+  const r = await upsertProgress(step_no, patch);
   if(r){ toast("Uploaded & synced"); maybeNotifyNext(step_no); renderTimeline(true); }
 }
 
@@ -1474,6 +1551,7 @@ alter table users add column if not exists contract_url text;
 alter table users add column if not exists contract_name text;
 alter table users add column if not exists contract_start date;
 alter table users add column if not exists contract_end date;
+alter table step_progress add column if not exists done_at timestamptz;
 
 -- Permissive policies for the shared anon key (internal tool)
 alter table users enable row level security;
