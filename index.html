@@ -378,6 +378,17 @@
   .table-scroll table.dash{border:none;border-radius:0;min-width:620px;width:100%}
   .table-scroll table.users{min-width:540px;width:100%;margin-top:0}
 
+  /* pull-to-refresh indicator */
+  .ptr{
+    position:fixed;top:calc(58px + env(safe-area-inset-top));left:50%;
+    transform:translateX(-50%);z-index:36;width:42px;height:42px;border-radius:50%;
+    background:var(--panel);border:2px solid var(--accent);color:var(--accent);
+    display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;
+    opacity:0;pointer-events:none;box-shadow:var(--shadow);
+  }
+  .ptr.spin .ptr-ic{animation:ptrspin .7s linear infinite}
+  @keyframes ptrspin{to{transform:rotate(360deg)}}
+
   /* bottom tab bar (mobile) */
   .tabbar{
     display:none;position:fixed;left:0;right:0;bottom:0;z-index:40;
@@ -733,10 +744,12 @@ async function loadDashboard(){
   const users=uRes.data||[], projects=pRes.data||[], prog=sRes.data||[];
   const doneSet = {}; // project_id -> Set of done step_no
   const bookDate = {}; // project_id -> YYYY-MM-DD of booking-step completion
+  const confDate = {}; // project_id -> YYYY-MM-DD of commission-successful completion
   prog.forEach(r=>{
     if(r.done){
       (doneSet[r.project_id]=doneSet[r.project_id]||new Set()).add(r.step_no);
       if(r.step_no===BOOKING_STEP) bookDate[r.project_id]=(r.done_at||r.updated_at||"").slice(0,10);
+      if(r.step_no===FINAL_STEP)   confDate[r.project_id]=(r.done_at||r.updated_at||"").slice(0,10);
     }
   });
 
@@ -755,38 +768,59 @@ async function loadDashboard(){
   const rows = {}; // username -> {counted, countedComm, confirmed, confirmedComm} — leaderboard, sales users only
   users.forEach(u=>{ rows[u.username]={counted:0,countedComm:0,confirmed:0,confirmedComm:0}; });
 
-  let tCounted=0,tComm=0,tConf=0; // company totals (eligible bookings only)
-  const monthly = {}; // 'YYYY-MM' -> {count, comm}
+  let tCounted=0,tComm=0,tConf=0,tConfComm=0; // company totals (eligible bookings only)
+  const monthly = {};   // company: 'YYYY-MM' -> {count, comm, confCount, confComm}
+  const myMonthly = {}; // current sales user's own months
+  let myCounted=0,myComm=0,myConf=0,myConfComm=0;
+  const mEnsure=(map,k)=> (map[k]=map[k]||{count:0,comm:0,confCount:0,confComm:0});
   projects.forEach(p=>{
     const who=p.created_by||"—";
     const ds=doneSet[p.id]||new Set();
     const comm=Number(p.commission)||0;
     const elig = eligibleBooking(p);
+    const mine = who===CURRENT_USER.username;
     if(elig){
       tCounted++; tComm+=comm;
       const mk=(bookDate[p.id]||"").slice(0,7);
-      if(mk){ (monthly[mk]=monthly[mk]||{count:0,comm:0}); monthly[mk].count++; monthly[mk].comm+=comm; }
+      if(mk){ const m=mEnsure(monthly,mk); m.count++; m.comm+=comm; }
+      if(mine){ myCounted++; myComm+=comm; if(mk){ const mm=mEnsure(myMonthly,mk); mm.count++; mm.comm+=comm; } }
     }
-    if(ds.has(FINAL_STEP)){ tConf++; }
+    if(ds.has(FINAL_STEP)){
+      tConf++; tConfComm+=comm;
+      const ck=(confDate[p.id]||"").slice(0,7);
+      if(ck){ const m=mEnsure(monthly,ck); m.confCount++; m.confComm+=comm; }
+      if(mine){ myConf++; myConfComm+=comm; if(ck){ const mm=mEnsure(myMonthly,ck); mm.confCount++; mm.confComm+=comm; } }
+    }
     if(!salesSet.has(who)) return; // admins/others excluded from leaderboard
     if(elig){ rows[who].counted++; rows[who].countedComm+=comm; }
     if(ds.has(FINAL_STEP)){ rows[who].confirmed++; rows[who].confirmedComm+=comm; }
   });
 
   const thisMonthKey = new Date().toISOString().slice(0,7);
-  const thisMonth = monthly[thisMonthKey] || {count:0, comm:0};
+  const thisMonth = monthly[thisMonthKey] || {count:0, comm:0, confCount:0, confComm:0};
+  const myThisMonth = myMonthly[thisMonthKey] || {count:0, comm:0, confCount:0, confComm:0};
 
   const names=Object.keys(rows).sort((a,b)=>
     (rows[b].countedComm-rows[a].countedComm) || (rows[b].counted-rows[a].counted));
   const leader = names.length && (rows[names[0]].counted>0 || rows[names[0]].countedComm>0) ? names[0] : null;
 
   const stat=(k,v,accent)=>`<div class="stat"><div class="k">${k}</div><div class="v ${accent?'accent':''}">${v}</div></div>`;
-  tot.innerHTML =
-    (leader ? `<div class="stat top hero"><div class="k">🏆 TOP PERFORMER</div><div class="v">${escapeHtml(leader)}</div><div class="sub">RM ${rows[leader].countedComm.toLocaleString()} commission · ${rows[leader].counted} sale${rows[leader].counted===1?"":"s"} counted</div></div>` : "") +
-    stat("This month", "RM "+thisMonth.comm.toLocaleString(), true) +
-    stat("Total commission", "RM "+tComm.toLocaleString(), true) +
-    stat("Sales counted", tCounted) +
-    stat("Commission confirmed", tConf+" sales");
+  const heroHtml = (leader && CURRENT_USER.role!=="account")
+    ? `<div class="stat top hero"><div class="k">🏆 TOP PERFORMER</div><div class="v">${escapeHtml(leader)}</div><div class="sub">RM ${rows[leader].countedComm.toLocaleString()} commission · ${rows[leader].counted} sale${rows[leader].counted===1?"":"s"} counted</div></div>`
+    : "";
+  if(CURRENT_USER.role==="sales"){
+    tot.innerHTML = heroHtml +
+      stat("This month (you)", "RM "+myThisMonth.comm.toLocaleString(), true) +
+      stat("Total commission (you)", "RM "+myComm.toLocaleString(), true) +
+      stat("Sales counted (you)", myCounted) +
+      stat("Confirmed (you)", myConf+" sale"+(myConf===1?"":"s"));
+  } else {
+    tot.innerHTML = heroHtml +
+      stat("This month", "RM "+thisMonth.comm.toLocaleString(), true) +
+      stat("Total commission", "RM "+tComm.toLocaleString(), true) +
+      stat("Sales counted", tCounted) +
+      stat("Confirmed commission", "RM "+tConfComm.toLocaleString());
+  }
 
   wrap.innerHTML="";
 
@@ -866,23 +900,42 @@ async function loadDashboard(){
   }
 
   // ---- monthly commission history (archive) ----
-  const monthKeys = Object.keys(monthly).sort().reverse();
+  const isSales = CURRENT_USER.role==="sales";
+  const histData = isSales ? myMonthly : monthly;
+  const monthKeys = Object.keys(histData).sort().reverse();
   if(monthKeys.length){
-    wrap.appendChild(el("div","dash-subhead","🗓 Monthly commission history"));
+    wrap.appendChild(el("div","dash-subhead", isSales ? "🗓 My monthly commission history" : "🗓 Monthly commission history"));
     const tm=el("table","dash");
-    tm.innerHTML="<tr><th>Month</th><th class='num'>Sales counted</th><th class='num'>Commission (RM)</th></tr>";
     const fmtMonth=k=>{ const [y,m]=k.split("-"); return new Date(y, m-1, 1).toLocaleString(undefined,{month:"long",year:"numeric"}); };
-    monthKeys.forEach(k=>{
-      const m=monthly[k];
-      const tr=el("tr"); if(k===thisMonthKey) tr.className="leader";
-      tr.innerHTML=`<td>${fmtMonth(k)}${k===thisMonthKey?" <span class='badge counted'>current</span>":""}</td>
-        <td class="num">${m.count}</td>
-        <td class="num">${m.comm.toLocaleString()}</td>`;
-      tm.appendChild(tr);
-    });
-    const trTot=el("tr"); trTot.className="total-row";
-    trTot.innerHTML=`<td><b>Total (all time)</b></td><td class="num"><b>${tCounted}</b></td><td class="num"><b>${tComm.toLocaleString()}</b></td>`;
-    tm.appendChild(trTot);
+    if(isSales){
+      tm.innerHTML="<tr><th>Month</th><th class='num'>My sales counted</th><th class='num'>My commission (RM)</th></tr>";
+      monthKeys.forEach(k=>{
+        const m=histData[k];
+        const tr=el("tr"); if(k===thisMonthKey) tr.className="leader";
+        tr.innerHTML=`<td>${fmtMonth(k)}${k===thisMonthKey?" <span class='badge counted'>current</span>":""}</td>
+          <td class="num">${m.count}</td>
+          <td class="num">${m.comm.toLocaleString()}</td>`;
+        tm.appendChild(tr);
+      });
+      const trTot=el("tr"); trTot.className="total-row";
+      trTot.innerHTML=`<td><b>Total (all time)</b></td><td class="num"><b>${myCounted}</b></td><td class="num"><b>${myComm.toLocaleString()}</b></td>`;
+      tm.appendChild(trTot);
+    } else {
+      tm.innerHTML="<tr><th>Month</th><th class='num'>Sales counted</th><th class='num'>Commission (RM)</th><th class='num'>Successful</th><th class='num'>Successful (RM)</th></tr>";
+      monthKeys.forEach(k=>{
+        const m=histData[k];
+        const tr=el("tr"); if(k===thisMonthKey) tr.className="leader";
+        tr.innerHTML=`<td>${fmtMonth(k)}${k===thisMonthKey?" <span class='badge counted'>current</span>":""}</td>
+          <td class="num">${m.count}</td>
+          <td class="num">${m.comm.toLocaleString()}</td>
+          <td class="num">${m.confCount}</td>
+          <td class="num">${m.confComm.toLocaleString()}</td>`;
+        tm.appendChild(tr);
+      });
+      const trTot=el("tr"); trTot.className="total-row";
+      trTot.innerHTML=`<td><b>Total (all time)</b></td><td class="num"><b>${tCounted}</b></td><td class="num"><b>${tComm.toLocaleString()}</b></td><td class="num"><b>${tConf}</b></td><td class="num"><b>${tConfComm.toLocaleString()}</b></td>`;
+      tm.appendChild(trTot);
+    }
     wrap.appendChild(scrollWrap(tm));
   }
 
@@ -1615,6 +1668,70 @@ if("serviceWorker" in navigator && location.protocol.startsWith("http")){
     navigator.serviceWorker.register("service-worker.js").catch(()=>{});
   });
 }
+
+/* ============ PULL TO REFRESH (dashboard + sales list) ============ */
+(function setupPullToRefresh(){
+  const ind = el("div","ptr"); ind.innerHTML='<div class="ptr-ic">↻</div>'; document.body.appendChild(ind);
+  let startY=null, pull=0, refreshing=false;
+  const eligible=()=> !refreshing && window.scrollY<=0 &&
+    $("#modalRoot").children.length===0 &&
+    !$("#app").classList.contains("hidden") &&
+    ( !$("#dashboardView").classList.contains("hidden") || !$("#projectsView").classList.contains("hidden") );
+  document.addEventListener("touchstart", e=>{
+    startY = eligible() ? e.touches[0].clientY : null; pull=0;
+  }, {passive:true});
+  document.addEventListener("touchmove", e=>{
+    if(startY===null) return;
+    const dy = e.touches[0].clientY - startY;
+    if(dy<=0){ pull=0; ind.style.opacity=0; ind.style.transform="translateX(-50%)"; return; }
+    pull = Math.min(dy*0.45, 84);
+    ind.style.opacity = Math.min(pull/55, 1);
+    ind.style.transform = `translateX(-50%) translateY(${pull}px) rotate(${pull*3.4}deg)`;
+  }, {passive:true});
+  document.addEventListener("touchend", ()=>{
+    if(startY===null) return;
+    const trigger = pull > 58;
+    startY=null;
+    if(trigger){
+      refreshing=true;
+      ind.classList.add("spin");
+      ind.style.transform="translateX(-50%) translateY(58px)";
+      const done=()=>{ refreshing=false; ind.classList.remove("spin"); ind.style.opacity=0; ind.style.transform="translateX(-50%)"; };
+      const p = !$("#dashboardView").classList.contains("hidden") ? loadDashboard() : loadProjects();
+      Promise.resolve(p).then(()=>{ toast("Refreshed"); setTimeout(done, 350); }).catch(done);
+    } else {
+      ind.style.opacity=0; ind.style.transform="translateX(-50%)";
+    }
+    pull=0;
+  }, {passive:true});
+})();
+
+/* ============ BACK BUTTON: navigate in-app, press twice to exit ============ */
+(function setupBackHandler(){
+  let exitArmed=false;
+  try{ history.pushState({voltek:1}, ""); }catch(e){ return; }
+  window.addEventListener("popstate", ()=>{
+    // 1) close an open modal
+    if($("#modalRoot").children.length){ closeModal(); history.pushState({voltek:1},""); return; }
+    // 2) step back from the tracker to the sales list
+    if(CURRENT_USER && !$("#trackerView").classList.contains("hidden")){
+      showView("sales"); history.pushState({voltek:1},""); return;
+    }
+    // 3) sales list → dashboard
+    if(CURRENT_USER && !$("#projectsView").classList.contains("hidden")){
+      showView("dashboard"); history.pushState({voltek:1},""); return;
+    }
+    // 4) at the root: arm exit, second press within 2s leaves the app
+    if(!exitArmed){
+      exitArmed=true;
+      toast("Press back again to exit");
+      history.pushState({voltek:1},"");
+      setTimeout(()=>{ exitArmed=false; }, 2000);
+    } else {
+      history.go(-1); // unwind for real — closes the app in APK/installed PWA
+    }
+  });
+})();
 </script>
 </body>
 </html>
