@@ -25,7 +25,7 @@
     --done:#3fae6f;
     --sales:#356b7a;
     --account:#4d7a3a;
-    --chatwoot:#6d5786;
+    --adminlane:#6d5786;
   }
   /* Default (brand) theme — charcoal + orange */
   [data-theme="default"]{
@@ -144,6 +144,16 @@
   .badge.counted{background:rgba(239,108,46,.18);color:var(--accent)}
   .badge.pending{background:var(--chip-bg);color:var(--muted)}
   .stat.top{border-color:var(--accent);background:linear-gradient(135deg,rgba(239,108,46,.14),transparent 65%),var(--panel)}
+  .stat.top.hero{
+    grid-column:1 / -1;
+    padding:24px 26px;
+    background:linear-gradient(120deg,rgba(239,108,46,.30),rgba(239,108,46,.07) 55%,transparent),var(--panel);
+    border:1px solid var(--accent);
+    box-shadow:0 10px 34px rgba(239,108,46,.22);
+  }
+  .stat.top.hero .k{color:var(--accent);font-size:13px;letter-spacing:1.5px}
+  .stat.top.hero .v{font-size:42px;letter-spacing:-1px;line-height:1.1}
+  .stat.top.hero .sub{font-size:14px;margin-top:6px}
   .stat .sub{font-size:12px;color:var(--muted);margin-top:3px}
   .motivate{
     background:linear-gradient(90deg,rgba(239,108,46,.16),transparent 70%),var(--panel);
@@ -256,7 +266,7 @@
   }
   .lane-pill.sales{background:var(--sales)}
   .lane-pill.account{background:var(--account)}
-  .lane-pill.chatwoot{background:var(--chatwoot)}
+  .lane-pill.admin{background:var(--adminlane)}
   .step-body{margin-top:12px}
   .resources{font-size:12px;color:var(--muted);margin-top:8px}
   .file-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:10px}
@@ -440,35 +450,35 @@ const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 /* ============ STEP DEFINITIONS (the flow 1..18) ============ */
 /* type: checklist | upload | calculator | download | auto */
 const STEPS = [
-  {no:1,  title:"Proposal",                 sub:"Share proposal with customer", lane:"chatwoot", type:"checklist", resources:["Video 1","Video 2","Video 3"]},
+  {no:1,  title:"Proposal",                 sub:"Share proposal with customer", lane:"admin", type:"checklist", resources:["Video 1","Video 2","Video 3"]},
   {no:2,  title:"Explore Product",          sub:"Walk the customer through products", lane:"sales", type:"checklist"},
   {no:3,  title:"Solar Cost Calculator",    sub:"Run the cost estimate with the customer", lane:"sales", type:"calculator"},
   {no:4,  title:"Proposals",                sub:"Confirm proposal details", lane:"sales", type:"checklist"},
   {no:5,  title:"AOO Form (Send Link)",     sub:"Send the AOO form link to customer", lane:"sales", type:"checklist"},
   {no:6,  title:"Transfer Slip (RM 1k Booking)", sub:"Upload booking payment slip", lane:"sales", type:"upload"},
   {no:7,  title:"Issue OR (File / PDF)",    sub:"Upload the official receipt", lane:"account", type:"upload"},
-  {no:8,  title:"Project Complete Design",  sub:"Confirm completed design", lane:"chatwoot", type:"checklist"},
+  {no:8,  title:"Project Complete Design",  sub:"Confirm completed design", lane:"admin", type:"checklist"},
   {no:9,  title:"Issue Invoice (80%)",      sub:"Upload the 80% invoice", lane:"account", type:"upload"},
   {no:10, title:"Transfer Slip 80%",        sub:"Upload the 80% payment slip", lane:"sales", type:"upload"},
   {no:11, title:"OR Slip (80%)",            sub:"Upload the 80% OR slip", lane:"account", type:"upload"},
-  {no:12, title:"Welcome Letter — SEDA",    sub:"Upload SEDA welcome letter", lane:"account", type:"upload"},
+  {no:12, title:"Welcome Letter — SEDA",    sub:"Upload SEDA welcome letter", lane:"admin", type:"upload"},
   {no:13, title:"Issue Invoice (20%)",      sub:"Upload the 20% invoice", lane:"account", type:"upload"},
   {no:14, title:"Transfer Slip 20%",        sub:"Upload the 20% payment slip", lane:"sales", type:"upload"},
   {no:15, title:"OR Slip 20% (Final)",      sub:"Upload the final 20% OR slip", lane:"account", type:"upload"},
   {no:16, title:"Energized & Handover (PDF)", sub:"Upload the energized & handover PDF", lane:"account", type:"upload"},
   {no:17, title:"Transfer Handover (PDF)",  sub:"Download the handover file from Account", lane:"sales", type:"download", source:16},
-  {no:18, title:"Commission Successful",    sub:"Counted to sales dashboard", lane:"account", type:"checklist"},
+  {no:18, title:"Commission Successful",    sub:"Counted to sales dashboard", lane:"admin", type:"checklist"},
 ];
 
-const LANE_LABEL = {sales:"Sales", account:"Account", chatwoot:"Chatwoot"};
-/* which lanes each role can see (Chatwoot visible to admin only) */
+const LANE_LABEL = {sales:"Sales", account:"Account", admin:"Admin"};
+/* which lanes each role can see — everyone sees the full flow */
 const ROLE_LANES = {
-  sales:   ["sales"],
-  account: ["account"],
-  admin:   ["sales","chatwoot","account"],
+  sales:   ["sales","admin","account"],
+  account: ["sales","admin","account"],
+  admin:   ["sales","admin","account"],
 };
 /* responsible role for a lane's steps */
-const LANE_ROLE = {sales:"sales", account:"account", chatwoot:"admin"};
+const LANE_ROLE = {sales:"sales", account:"account", admin:"admin"};
 
 /* ============ TINY HELPERS ============ */
 const $ = s => document.querySelector(s);
@@ -619,29 +629,32 @@ async function loadDashboard(){
   const doneSet = {}; // project_id -> Set of done step_no
   prog.forEach(r=>{ if(r.done){ (doneSet[r.project_id]=doneSet[r.project_id]||new Set()).add(r.step_no); }});
 
-  const rows = {}; // username -> {counted, countedComm, confirmed, confirmedComm}
+  const salesSet = new Set(users.map(u=>u.username)); // sales-role users only
+  const rows = {}; // username -> {counted, countedComm, confirmed, confirmedComm} — leaderboard, sales users only
   users.forEach(u=>{ rows[u.username]={counted:0,countedComm:0,confirmed:0,confirmedComm:0}; });
+
+  let tCounted=0,tComm=0,tConf=0; // company totals include every sale
   projects.forEach(p=>{
     const who=p.created_by||"—";
-    if(!rows[who]) rows[who]={counted:0,countedComm:0,confirmed:0,confirmedComm:0};
     const ds=doneSet[p.id]||new Set();
     const comm=Number(p.commission)||0;
+    if(ds.has(BOOKING_STEP)){ tCounted++; tComm+=comm; }
+    if(ds.has(FINAL_STEP)){ tConf++; }
+    if(!salesSet.has(who)) return; // admins/others excluded from leaderboard
     if(ds.has(BOOKING_STEP)){ rows[who].counted++; rows[who].countedComm+=comm; }
     if(ds.has(FINAL_STEP)){ rows[who].confirmed++; rows[who].confirmedComm+=comm; }
   });
-
-  let tCounted=0,tComm=0,tConf=0;
-  Object.values(rows).forEach(r=>{ tCounted+=r.counted; tComm+=r.countedComm; tConf+=r.confirmed; });
 
   const names=Object.keys(rows).sort((a,b)=>
     (rows[b].countedComm-rows[a].countedComm) || (rows[b].counted-rows[a].counted));
   const leader = names.length && (rows[names[0]].counted>0 || rows[names[0]].countedComm>0) ? names[0] : null;
 
   const stat=(k,v,accent)=>`<div class="stat"><div class="k">${k}</div><div class="v ${accent?'accent':''}">${v}</div></div>`;
-  tot.innerHTML = stat("Sales counted", tCounted) +
-                  stat("Commission counted", "RM "+tComm.toLocaleString(), true) +
-                  stat("Commission confirmed", tConf+" sales") +
-                  (leader ? `<div class="stat top"><div class="k">🏆 Top performer</div><div class="v">${escapeHtml(leader)}</div><div class="sub">RM ${rows[leader].countedComm.toLocaleString()} · ${rows[leader].counted} sale${rows[leader].counted===1?"":"s"}</div></div>` : "");
+  tot.innerHTML =
+    (leader ? `<div class="stat top hero"><div class="k">🏆 TOP PERFORMER</div><div class="v">${escapeHtml(leader)}</div><div class="sub">RM ${rows[leader].countedComm.toLocaleString()} commission · ${rows[leader].counted} sale${rows[leader].counted===1?"":"s"} counted</div></div>` : "") +
+    stat("Sales counted", tCounted) +
+    stat("Commission counted", "RM "+tComm.toLocaleString(), true) +
+    stat("Commission confirmed", tConf+" sales");
 
   wrap.innerHTML="";
 
@@ -766,7 +779,7 @@ function visibleLanes(){ return ROLE_LANES[CURRENT_USER.role] || []; }
 function buildLaneTabs(){
   const lanes = visibleLanes();
   const tabs = $("#laneTabs"); tabs.innerHTML="";
-  // Sales role: merge sales+chatwoot under one "My steps" feel but keep "All"
+  // Everyone sees all lanes; tabs let them filter
   const tabList = lanes.length>1 ? ["all", ...lanes] : lanes;
   if(!ACTIVE_LANE || (tabList.indexOf(ACTIVE_LANE)===-1)) ACTIVE_LANE = tabList[0];
   tabList.forEach(l=>{
@@ -880,12 +893,19 @@ function renderTimeline(scrollToNext){
   if(scrollToNext && nextCard){ setTimeout(()=>{ try{nextCard.scrollIntoView({behavior:"smooth",block:"center"});}catch(e){} }, 150); }
 }
 
+function downloadUrl(url, name){
+  if(!url) return url;
+  return url + (url.includes("?") ? "&" : "?") + "download=" + encodeURIComponent(name||"");
+}
 function renderUpload(body, s, prog, done){
   if(prog.file_url){
     const row = el("div","file-row");
     const a = el("a","file-tag"); a.href=prog.file_url; a.target="_blank"; a.rel="noopener";
     a.innerHTML = "📎 "+escapeHtml(prog.file_name||"View file");
     row.appendChild(a);
+    const dl = el("a","file-tag"); dl.href=downloadUrl(prog.file_url, prog.file_name);
+    dl.innerHTML = "⬇ Download";
+    row.appendChild(dl);
     const repl = el("label","file-input-label"); repl.textContent="Replace file";
     const inp = el("input"); inp.type="file"; inp.style.display="none";
     inp.accept="image/*,application/pdf";
@@ -907,10 +927,12 @@ function renderDownload(body, s, prog, done){
   const srcProg = PROGRESS[s.source];
   if(srcProg && srcProg.file_url){
     const row = el("div","file-row");
-    const a = el("a","file-tag"); a.href=srcProg.file_url; a.target="_blank"; a.rel="noopener";
+    const a = el("a","file-tag"); a.href=downloadUrl(srcProg.file_url, srcProg.file_name); a.rel="noopener";
     a.innerHTML="⬇ Download from Account: "+escapeHtml(srcProg.file_name||"handover file");
-    a.setAttribute("download","");
     row.appendChild(a);
+    const vw = el("a","file-tag"); vw.href=srcProg.file_url; vw.target="_blank"; vw.rel="noopener";
+    vw.innerHTML="📎 View";
+    row.appendChild(vw);
     body.appendChild(row);
   } else {
     body.appendChild(el("div","resources","Waiting for Account to upload the handover file (step: Energized & Handover)."));
@@ -1032,11 +1054,11 @@ async function fillSalesSelect(id, selected){
   const sel=$("#"+id); if(!sel) return;
   const list=await getSalesUsers();
   sel.innerHTML="";
-  if(CURRENT_USER.role==="admin" && !list.includes(CURRENT_USER.username)){
-    const o=document.createElement("option"); o.value=CURRENT_USER.username; o.textContent=CURRENT_USER.username+" (me, admin)"; sel.appendChild(o);
-  }
   list.forEach(u=>{ const o=document.createElement("option"); o.value=u; o.textContent=u; sel.appendChild(o); });
-  if(selected) sel.value=selected;
+  if(!list.length){ // fallback only if no sales users exist yet
+    const o=document.createElement("option"); o.value=CURRENT_USER.username; o.textContent=CURRENT_USER.username+" (no sales users yet)"; sel.appendChild(o);
+  }
+  if(selected && [...sel.options].some(o=>o.value===selected)) sel.value=selected;
 }
 function newProjectModal(){
   const isAdmin = CURRENT_USER.role==="admin";
