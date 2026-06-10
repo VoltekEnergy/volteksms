@@ -143,6 +143,14 @@
   .badge.confirmed{background:rgba(63,174,111,.18);color:#3fae6f}
   .badge.counted{background:rgba(239,108,46,.18);color:var(--accent)}
   .badge.pending{background:var(--chip-bg);color:var(--muted)}
+  .stat.top{border-color:var(--accent);background:linear-gradient(135deg,rgba(239,108,46,.14),transparent 65%),var(--panel)}
+  .stat .sub{font-size:12px;color:var(--muted);margin-top:3px}
+  .motivate{
+    background:linear-gradient(90deg,rgba(239,108,46,.16),transparent 70%),var(--panel);
+    border:1px solid var(--accent);border-radius:12px;padding:13px 16px;font-size:14px;margin:0 0 16px;
+  }
+  table.dash td.rank{font-size:16px;width:54px}
+  table.dash tr.leader td{background:linear-gradient(90deg,rgba(239,108,46,.10),transparent 70%)}
   .role-chip{
     font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;
     padding:5px 10px;border-radius:999px;background:var(--chip-bg);color:var(--muted);
@@ -217,6 +225,28 @@
     padding:14px 16px;transition:border-color .15s;
   }
   .step.done .step-card{border-color:rgba(63,174,111,.5)}
+  .step.next .node{background:var(--accent);border-color:var(--accent);color:#fff;animation:pulse-node 1.6s infinite}
+  .step.next .step-card{
+    border-color:var(--accent);
+    box-shadow:0 0 0 1px var(--accent), 0 8px 28px rgba(239,108,46,.25);
+    animation:pulse-card 1.8s infinite;
+  }
+  @keyframes pulse-card{
+    0%,100%{box-shadow:0 0 0 1px var(--accent), 0 8px 28px rgba(239,108,46,.22)}
+    50%{box-shadow:0 0 0 3px var(--accent), 0 8px 34px rgba(239,108,46,.42)}
+  }
+  @keyframes pulse-node{0%,100%{transform:scale(1)}50%{transform:scale(1.18)}}
+  .next-pill{
+    font-size:10px;font-weight:800;letter-spacing:.6px;padding:4px 9px;border-radius:999px;
+    background:var(--accent);color:#fff;white-space:nowrap;animation:pulse-node 1.6s infinite;
+  }
+  .next-banner{
+    display:flex;align-items:center;gap:9px;background:var(--panel);border:1px solid var(--line);
+    border-left:4px solid var(--muted);border-radius:12px;padding:12px 15px;font-size:13.5px;margin:0 0 16px;
+  }
+  .next-banner.mine{border-color:var(--accent);border-left-color:var(--accent);background:linear-gradient(90deg,rgba(239,108,46,.12),transparent 60%),var(--panel)}
+  .nb-dot{width:9px;height:9px;border-radius:50%;background:var(--muted);flex:none}
+  .next-banner.mine .nb-dot{background:var(--accent);animation:pulse-node 1.4s infinite}
   .step-top{display:flex;align-items:flex-start;gap:10px}
   .step-title{font-weight:700;font-size:15px;margin:0}
   .step-sub{color:var(--muted);font-size:12.5px;margin:3px 0 0}
@@ -339,8 +369,8 @@
       <div class="logo"><img id="barLogo" alt="Voltek" /></div>
       <h2>Voltek Sales Management System</h2>
       <nav class="topnav">
-        <button class="navbtn active" id="navHome">Home</button>
-        <button class="navbtn" id="navSales">Sales</button>
+        <button class="navbtn active" id="navHome">Dashboard</button>
+        <button class="navbtn" id="navSales">Sales Ops</button>
       </nav>
       <div class="spacer"></div>
       <span class="role-chip" id="roleChip">—</span>
@@ -365,7 +395,7 @@
     <!-- SALES LIST -->
     <div id="projectsView" class="hidden">
       <div class="section-head">
-        <h3>Sales</h3>
+        <h3>Sales Ops</h3>
         <div class="spacer"></div>
         <button class="btn sm" id="newProjectBtn">+ New sale</button>
       </div>
@@ -375,7 +405,7 @@
 
     <!-- TRACKER -->
     <div id="trackerView" class="hidden">
-      <button class="back-link" id="backBtn">← Back to sales</button>
+      <button class="back-link" id="backBtn">← Back to Sales Ops</button>
       <div class="tracker-head">
         <h3 id="trkName">—</h3>
         <span class="pcust" id="trkCust"></span>
@@ -561,11 +591,11 @@ async function loadProjects(){
 }
 function escapeHtml(s){ return (s||"").replace(/[&<>"']/g, m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m])); }
 
-async function createProject(customer, commission){
+async function createProject(customer, commission, assignee){
   const {error} = await sb.from("projects")
-    .insert({name:customer, customer, commission:commission||0, created_by:CURRENT_USER.username});
+    .insert({name:customer, customer, commission:commission||0, created_by:assignee||CURRENT_USER.username});
   if(error){ toast("Could not create sale: "+error.message, true); return; }
-  toast("Sale created");
+  toast("Sale created"+(assignee && assignee!==CURRENT_USER.username ? " and assigned to "+assignee : ""));
   loadProjects();
 }
 
@@ -603,23 +633,50 @@ async function loadDashboard(){
   let tCounted=0,tComm=0,tConf=0;
   Object.values(rows).forEach(r=>{ tCounted+=r.counted; tComm+=r.countedComm; tConf+=r.confirmed; });
 
+  const names=Object.keys(rows).sort((a,b)=>
+    (rows[b].countedComm-rows[a].countedComm) || (rows[b].counted-rows[a].counted));
+  const leader = names.length && (rows[names[0]].counted>0 || rows[names[0]].countedComm>0) ? names[0] : null;
+
   const stat=(k,v,accent)=>`<div class="stat"><div class="k">${k}</div><div class="v ${accent?'accent':''}">${v}</div></div>`;
   tot.innerHTML = stat("Sales counted", tCounted) +
                   stat("Commission counted", "RM "+tComm.toLocaleString(), true) +
-                  stat("Commission confirmed", tConf+" sales");
+                  stat("Commission confirmed", tConf+" sales") +
+                  (leader ? `<div class="stat top"><div class="k">🏆 Top performer</div><div class="v">${escapeHtml(leader)}</div><div class="sub">RM ${rows[leader].countedComm.toLocaleString()} · ${rows[leader].counted} sale${rows[leader].counted===1?"":"s"}</div></div>` : "");
 
   wrap.innerHTML="";
 
-  // ---- per-salesperson table ----
-  const names=Object.keys(rows).sort((a,b)=>rows[b].countedComm-rows[a].countedComm);
+  // personal motivation line for sales users
+  if(CURRENT_USER.role==="sales" && names.length){
+    const myIdx = names.indexOf(CURRENT_USER.username);
+    if(myIdx>-1){
+      const me=rows[CURRENT_USER.username];
+      let msg;
+      if(myIdx===0 && (me.counted>0||me.countedComm>0)){
+        msg=`🔥 You're <b>#1</b> with RM ${me.countedComm.toLocaleString()} — keep the lead!`;
+      } else if(me.counted>0||me.countedComm>0){
+        const ahead=rows[names[myIdx-1]];
+        const gap=Math.max(0, ahead.countedComm-me.countedComm);
+        msg=`💪 You're <b>#${myIdx+1}</b>. ${gap>0?("RM "+gap.toLocaleString()+" behind "+escapeHtml(names[myIdx-1])+" — one booking can close the gap!"):"You're tied — the next booking puts you ahead!"}`;
+      } else {
+        msg=`🚀 Your leaderboard spot is waiting — close your first booking to get on the board!`;
+      }
+      wrap.appendChild(el("div","motivate",msg));
+    }
+  }
+
+  // ---- leaderboard ----
   if(names.length){
-    wrap.appendChild(el("div","dash-subhead","By salesperson"));
+    wrap.appendChild(el("div","dash-subhead","🏁 Leaderboard"));
     const t=el("table","dash");
-    t.innerHTML="<tr><th>Salesperson</th><th class='num'>Sales counted</th><th class='num'>Commission (RM)</th><th class='num'>Confirmed</th><th class='num'>Confirmed (RM)</th></tr>";
-    names.forEach(n=>{
+    t.innerHTML="<tr><th>Rank</th><th>Salesperson</th><th class='num'>Sales counted</th><th class='num'>Commission (RM)</th><th class='num'>Confirmed</th><th class='num'>Confirmed (RM)</th></tr>";
+    const medals=["🥇","🥈","🥉"];
+    names.forEach((n,i)=>{
       const r=rows[n]; const me=n===CURRENT_USER.username?"me":"";
-      const tr=el("tr");
-      tr.innerHTML=`<td class="${me}">${escapeHtml(n)}</td>
+      const hasScore=r.counted>0||r.countedComm>0;
+      const rank = hasScore ? (medals[i]||("#"+(i+1))) : "—";
+      const tr=el("tr"); if(i===0&&hasScore) tr.className="leader";
+      tr.innerHTML=`<td class="rank">${rank}</td>
+        <td class="${me}">${escapeHtml(n)}</td>
         <td class="num">${r.counted}</td>
         <td class="num">${r.countedComm.toLocaleString()}</td>
         <td class="num">${r.confirmed}</td>
@@ -665,26 +722,33 @@ async function openProject(p){
   $("#deleteSaleBtn").classList.toggle("hidden", !canManage);
   await loadProgress();
   buildLaneTabs();
-  renderTimeline();
+  renderTimeline(true);
 }
 function editSaleModal(){
   const p=CURRENT_PROJECT;
+  const isAdmin = CURRENT_USER.role==="admin";
   const body=el("div");
   body.innerHTML=`
     <div class="field"><label>Customer name</label><input id="esCust" value="${escapeHtml(p.name||"")}"/></div>
-    <div class="field"><label>Commission (RM)</label><input id="esComm" type="number" min="0" step="0.01" value="${p.commission!=null?p.commission:0}"/></div>`;
+    <div class="field"><label>Commission (RM)</label><input id="esComm" type="number" min="0" step="0.01" value="${p.commission!=null?p.commission:0}"/></div>
+    ${isAdmin?`<div class="field"><label>Assigned salesperson</label>${salesSelectHtml("esAssign")}</div>`:""}`;
   const foot=el("div"); foot.style.display="flex"; foot.style.gap="10px";
   const cancel=el("button","btn ghost sm","Cancel"); cancel.onclick=closeModal;
   const save=el("button","btn sm","Save changes");
   save.onclick=async()=>{
     const c=$("#esCust").value.trim(); if(!c){toast("Enter a customer name",true);return;}
     const comm=parseFloat($("#esComm").value)||0;
-    const {data,error}=await sb.from("projects").update({name:c,customer:c,commission:comm}).eq("id",p.id).select().single();
+    const patch={name:c,customer:c,commission:comm};
+    if(isAdmin && $("#esAssign")) patch.created_by=$("#esAssign").value;
+    const {data,error}=await sb.from("projects").update(patch).eq("id",p.id).select().single();
     if(error){toast("Save failed: "+error.message,true);return;}
-    CURRENT_PROJECT=data; $("#trkName").textContent=data.name; closeModal(); toast("Sale updated"); renderTimeline();
+    CURRENT_PROJECT=data; $("#trkName").textContent=data.name;
+    $("#trkCust").textContent = data.created_by ? "· Salesperson: "+data.created_by : "";
+    closeModal(); toast("Sale updated"); renderTimeline();
   };
   foot.appendChild(cancel); foot.appendChild(save);
   modal("Edit sale", body, foot);
+  if(isAdmin) fillSalesSelect("esAssign", p.created_by);
 }
 async function deleteSale(){
   const p=CURRENT_PROJECT;
@@ -727,24 +791,47 @@ function updateOverall(){
   $("#trkBarText").textContent = `${done} of ${total} steps complete`;
   $("#trkPct").textContent = pct+"%";
 }
-function renderTimeline(){
+function nextPendingStepNo(){
+  for(const s of STEPS){ if(!(PROGRESS[s.no] && PROGRESS[s.no].done)) return s.no; }
+  return null;
+}
+function renderTimeline(scrollToNext){
   updateOverall();
   const tl = $("#timeline"); tl.innerHTML="";
   const steps = stepsForView();
   if(!steps.length){ tl.innerHTML="<div class='empty'>No steps for your role in this view.</div>"; return; }
+
+  const nextNo = nextPendingStepNo();
+  const nextStep = STEPS.find(x=>x.no===nextNo);
+  const myTurn = nextStep && LANE_ROLE[nextStep.lane]===CURRENT_USER.role;
+
+  // action banner above timeline
+  const oldBanner=$("#nextBanner"); if(oldBanner) oldBanner.remove();
+  if(nextStep){
+    const bn=el("div","next-banner"+(myTurn?" mine":"")); bn.id="nextBanner";
+    bn.innerHTML = myTurn
+      ? `<span class="nb-dot"></span><b>Your turn:</b>&nbsp;${escapeHtml(nextStep.title)} — this step is waiting on ${LANE_LABEL[nextStep.lane]}.`
+      : `<span class="nb-dot"></span>Next step: <b>&nbsp;${escapeHtml(nextStep.title)}</b>&nbsp;(${LANE_LABEL[nextStep.lane]})`;
+    tl.parentNode.insertBefore(bn, tl);
+  }
+
+  let nextCard=null;
   steps.forEach(s=>{
     const prog = PROGRESS[s.no] || {};
     const done = !!prog.done;
-    const wrap = el("div","step"+(done?" done":""));
-    const node = el("div","node", done?"✓":"");
+    const isNext = s.no===nextNo;
+    const wrap = el("div","step"+(done?" done":"")+(isNext?" next":""));
+    const node = el("div","node", done?"✓":(isNext?"●":""));
     wrap.appendChild(node);
     const card = el("div","step-card");
+    if(isNext) nextCard=wrap;
 
     // header
     const top = el("div","step-top");
     const tt = el("div","",`<p class="step-title">${escapeHtml(s.title)}</p><p class="step-sub">${escapeHtml(s.sub)}</p>`);
     top.appendChild(tt);
     const spacer = el("div"); spacer.style.flex="1"; top.appendChild(spacer);
+    if(isNext) top.appendChild(el("span","next-pill","NEXT STEP"));
     top.appendChild(el("span","lane-pill "+s.lane, LANE_LABEL[s.lane]));
     card.appendChild(top);
 
@@ -790,6 +877,7 @@ function renderTimeline(){
     wrap.appendChild(card);
     tl.appendChild(wrap);
   });
+  if(scrollToNext && nextCard){ setTimeout(()=>{ try{nextCard.scrollIntoView({behavior:"smooth",block:"center"});}catch(e){} }, 150); }
 }
 
 function renderUpload(body, s, prog, done){
@@ -843,7 +931,7 @@ async function upsertProgress(step_no, patch){
 }
 async function toggleDone(step_no, val){
   const r = await upsertProgress(step_no, {done:val});
-  if(r){ toast(val?"Marked done":"Marked not done"); if(val) maybeNotifyNext(step_no); renderTimeline();
+  if(r){ toast(val?"Marked done":"Marked not done"); if(val) maybeNotifyNext(step_no); renderTimeline(val);
     if(step_no===BOOKING_STEP||step_no===FINAL_STEP){/* affects dashboard */} }
 }
 async function handleUpload(step_no, file){
@@ -856,7 +944,7 @@ async function handleUpload(step_no, file){
   if(upErr){ toast("Upload failed: "+upErr.message, true); return; }
   const {data:pub} = sb.storage.from(BUCKET).getPublicUrl(path);
   const r = await upsertProgress(step_no, {done:true, file_url:pub.publicUrl, file_name:file.name});
-  if(r){ toast("Uploaded & synced"); maybeNotifyNext(step_no); renderTimeline(); }
+  if(r){ toast("Uploaded & synced"); maybeNotifyNext(step_no); renderTimeline(true); }
 }
 
 /* ============ NOTIFICATIONS ============ */
@@ -933,18 +1021,39 @@ function modal(title, bodyNode, footNode){
   bg.appendChild(m); $("#modalRoot").appendChild(bg);
 }
 
+async function getSalesUsers(){
+  const {data} = await sb.from("users").select("username").eq("role","sales").order("username");
+  return (data||[]).map(u=>u.username);
+}
+function salesSelectHtml(id, selected, includeSelf){
+  return `<select id="${id}" style="width:100%;padding:12px 13px;border-radius:10px;border:1px solid var(--field-line);background:var(--field);color:var(--text)"></select>`;
+}
+async function fillSalesSelect(id, selected){
+  const sel=$("#"+id); if(!sel) return;
+  const list=await getSalesUsers();
+  sel.innerHTML="";
+  if(CURRENT_USER.role==="admin" && !list.includes(CURRENT_USER.username)){
+    const o=document.createElement("option"); o.value=CURRENT_USER.username; o.textContent=CURRENT_USER.username+" (me, admin)"; sel.appendChild(o);
+  }
+  list.forEach(u=>{ const o=document.createElement("option"); o.value=u; o.textContent=u; sel.appendChild(o); });
+  if(selected) sel.value=selected;
+}
 function newProjectModal(){
+  const isAdmin = CURRENT_USER.role==="admin";
   const body=el("div");
   body.innerHTML=`
     <div class="field"><label>Customer name</label><input id="npCust" placeholder="e.g. Ahmad bin Ali"/></div>
-    <div class="field"><label>Commission (RM, optional)</label><input id="npComm" type="number" min="0" step="0.01" placeholder="e.g. 1500"/></div>`;
+    <div class="field"><label>Commission (RM, optional)</label><input id="npComm" type="number" min="0" step="0.01" placeholder="e.g. 1500"/></div>
+    ${isAdmin?`<div class="field"><label>Assign to salesperson</label>${salesSelectHtml("npAssign")}</div>`:""}`;
   const foot=el("div"); foot.style.display="flex"; foot.style.gap="10px";
   const cancel=el("button","btn ghost sm","Cancel"); cancel.onclick=closeModal;
   const save=el("button","btn sm","Create sale");
   save.onclick=async()=>{ const c=$("#npCust").value.trim(); if(!c){toast("Enter a customer name",true);return;}
-    await createProject(c, parseFloat($("#npComm").value)||0); closeModal(); };
+    const assignee = isAdmin && $("#npAssign") ? $("#npAssign").value : CURRENT_USER.username;
+    await createProject(c, parseFloat($("#npComm").value)||0, assignee); closeModal(); };
   foot.appendChild(cancel); foot.appendChild(save);
   modal("New sale", body, foot);
+  if(isAdmin) fillSalesSelect("npAssign", CURRENT_USER.username);
 }
 
 /* ---- SETTINGS ---- */
