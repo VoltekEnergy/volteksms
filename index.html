@@ -314,6 +314,8 @@
   .file-tag:hover{border-color:var(--accent)}
   .filepreview img{max-height:140px;border-radius:8px;border:1px solid var(--line);margin-top:8px;display:block}
   .check-row{display:flex;align-items:center;gap:10px;font-size:14px}
+  .check-row.locked{color:var(--muted);cursor:not-allowed}
+  .check-row.locked input{opacity:.45;cursor:not-allowed}
   .check-row input{width:18px;height:18px;accent-color:var(--accent)}
   .updated{font-size:11px;color:var(--muted);margin-top:9px}
   .note-wrap{margin-top:12px}
@@ -576,7 +578,9 @@ const LOGO_SRC = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAvgAAADjCAYAAADw
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 // Warm-up ping: wakes a paused project and opens the TLS connection while the
 // user is still on the login screen, so the first real query is fast.
-try{ sb.from("users").select("id",{count:"exact",head:true}).limit(1).then(()=>{}); }catch(e){}
+try{ fetch(SUPABASE_URL+"/auth/v1/health", {headers:{apikey:SUPABASE_ANON_KEY}}).catch(()=>{}); }catch(e){}
+const EMAIL_DOMAIN = "voltek-sales.app";
+function emailFor(u){ return (u||"").trim().toLowerCase().replace(/[^a-z0-9._-]/g,"") + "@" + EMAIL_DOMAIN; }
 
 /* ============ STEP DEFINITIONS (the flow 1..18) ============ */
 /* type: checklist | upload | calculator | download | auto */
@@ -619,11 +623,6 @@ const safeStore = {
   set(k,v){ try{localStorage.setItem(k,v)}catch(e){} },
   del(k){ try{localStorage.removeItem(k)}catch(e){} },
 };
-async function sha256(txt){
-  const data = new TextEncoder().encode(txt);
-  const buf = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,"0")).join("");
-}
 let toastT;
 function toast(msg, isErr){
   const t=$("#toast"); t.textContent=msg; t.style.borderColor = isErr?"#c5463c":"var(--accent)";
@@ -662,40 +661,28 @@ applyTheme(safeStore.get("voltek_theme") || "default");
 $("#loginLogo").src = LOGO_SRC;
 $("#barLogo").src = LOGO_SRC;
 
-/* ============ BOOTSTRAP DEFAULT ADMIN ============ */
-async function ensureSeedAdmin(){
-  try{
-    const {count, error} = await sb.from("users").select("*",{count:"exact",head:true});
-    if(error) return; // table may not exist yet
-    if(count === 0){
-      const hash = await sha256("admin123");
-      await sb.from("users").insert({username:"admin", password_hash:hash, role:"admin"});
-    }
-  }catch(e){}
-}
-
-/* ============ AUTH ============ */
+/* ============ AUTH (Supabase Auth — passwords verified server-side) ============ */
 async function doLogin(){
   const u = $("#loginUser").value.trim();
   const p = $("#loginPass").value;
   const msg = $("#loginMsg");
   msg.className="msg"; msg.textContent="Checking…";
   if(!u || !p){ msg.className="msg err"; msg.textContent="Enter username and password."; return; }
-  await ensureSeedAdmin();
   try{
-    const {data, error} = await sb.from("users").select("*").eq("username", u).limit(1);
-    if(error){ msg.className="msg err"; msg.textContent="Database not reachable. Check Supabase setup."; return; }
-    if(!data || !data.length){ msg.className="msg err"; msg.textContent="User not found."; return; }
-    const user = data[0];
-    const hash = await sha256(p);
-    if(hash !== user.password_hash){ msg.className="msg err"; msg.textContent="Incorrect password."; return; }
-    CURRENT_USER = {id:user.id, username:user.username, role:user.role};
-    safeStore.set("voltek_session", JSON.stringify(CURRENT_USER));
+    const {data, error} = await sb.auth.signInWithPassword({email: emailFor(u), password: p});
+    if(error){ msg.className="msg err"; msg.textContent="Invalid username or password."; return; }
+    const prof = await sb.from("profiles").select("id,username,role").eq("id", data.user.id).single();
+    if(prof.error || !prof.data){
+      msg.className="msg err"; msg.textContent="No profile for this login — ask your admin.";
+      await sb.auth.signOut(); return;
+    }
+    CURRENT_USER = {id:prof.data.id, username:prof.data.username, role:prof.data.role};
     enterApp();
   }catch(e){ msg.className="msg err"; msg.textContent="Login failed: "+e.message; }
 }
-function logout(){
-  CURRENT_USER=null; CURRENT_PROJECT=null; safeStore.del("voltek_session");
+async function logout(){
+  try{ await sb.auth.signOut(); }catch(e){}
+  CURRENT_USER=null; CURRENT_PROJECT=null;
   stopNotifications();
   $("#app").classList.add("hidden"); $("#login").classList.remove("hidden");
   $("#loginPass").value=""; $("#loginMsg").textContent="";
@@ -813,13 +800,13 @@ async function loadDashboard(){
   } else {
     // FALLBACK (setup SQL not run yet): three parallel queries
     const [uRes,pRes,sRes] = await Promise.all([
-      sb.from("users").select("username,role,contract_start,contract_end,contract_url,contract_name").eq("role","sales"),
+      sb.from("profiles").select("username,role").eq("role","sales"),
       sb.from("projects").select("*"),
       sb.from("step_progress").select("project_id,step_no,done,done_at,updated_at").eq("done", true),
     ]);
     const firstErr = uRes.error || pRes.error || sRes.error;
     if(firstErr){
-      wrap.innerHTML="<div class='empty'>Could not load dashboard.<br><span style='font-size:12px'>"+escapeHtml(firstErr.message)+"</span><br><span style='font-size:12px'>Re-run supabase_setup.sql and refresh.</span></div>";
+      wrap.innerHTML="<div class='empty'>Could not load dashboard.<br><span style='font-size:12px'>"+escapeHtml(firstErr.message)+"</span><br><span style='font-size:12px'>Run supabase_secure_setup.sql and refresh.</span></div>";
       return;
     }
     users=uRes.data||[]; projects=pRes.data||[]; prog=sRes.data||[];
@@ -842,15 +829,15 @@ async function loadDashboard(){
   saveProjCache();
 
   const salesSet = new Set(users.map(u=>u.username)); // sales-role users only
-  const contractOf = {}; users.forEach(u=>{ contractOf[u.username]={start:u.contract_start,end:u.contract_end}; });
-  // a booking's commission counts only if it was booked within the salesperson's contract window
+  // eligibility & month attribution are computed inside the database
+  // (contract dates never leave the server for non-admin viewers)
+  projects.forEach(p=>{
+    if(p.book_date) bookDate[p.id]=p.book_date;
+    if(p.conf_date) confDate[p.id]=p.conf_date;
+  });
   function eligibleBooking(p){
-    const d = bookDate[p.id];
-    if(!d) return false;                        // not booked yet
-    const c = contractOf[p.created_by];
-    if(!c || !c.end) return true;               // no contract dates set → not restricted
-    if(c.start && d < c.start) return false;
-    return d <= c.end;                          // renewal extends end → booking counts again
+    if(typeof p.eligible === "boolean") return p.eligible && !!bookDate[p.id];
+    return !!bookDate[p.id]; // fallback path: no contract data, count when booked
   }
 
   const rows = {}; // username -> {counted, countedComm, confirmed, confirmedComm} — leaderboard, sales users only
@@ -1042,8 +1029,14 @@ async function loadDashboard(){
         else if(st && st.cls==="expiring") tr.className="c-expiring";
         tr.innerHTML=`<td>${escapeHtml(u.username)}</td>
           <td>${u.contract_start||"—"} → ${u.contract_end||"—"}</td>
-          <td>${st?`<span class="cbadge ${st.cls}">${st.label}</span>`:"<span style='color:var(--muted)'>No dates set</span>"}</td>
-          <td>${u.contract_url?`<a class="mini-link" href="${u.contract_url}" target="_blank" rel="noopener">📎 View</a>&nbsp; <a class="mini-link" href="${downloadUrl(u.contract_url,u.contract_name)}">⬇ Download</a>`:"<span style='color:var(--muted)'>Not uploaded</span>"}</td>`;
+          <td>${st?`<span class="cbadge ${st.cls}">${st.label}</span>`:"<span style='color:var(--muted)'>No dates set</span>"}</td>`;
+        const tdA=el("td");
+        if(u.contract_url){
+          const vw=el("a","mini-link","📎 View"); vw.target="_blank"; vw.rel="noopener"; fileHref(vw,u.contract_url,u.contract_name,false);
+          const dl=el("a","mini-link","⬇ Download"); dl.style.marginLeft="8px"; fileHref(dl,u.contract_url,u.contract_name,true);
+          tdA.appendChild(vw); tdA.appendChild(dl);
+        } else tdA.innerHTML="<span style='color:var(--muted)'>Not uploaded</span>";
+        tr.appendChild(tdA);
         t3.appendChild(tr);
       });
       wrap.appendChild(scrollWrap(t3));
@@ -1097,10 +1090,15 @@ async function deleteSale(){
   if(error){toast("Delete failed: "+error.message,true);return;}
   toast("Sale deleted"); showView("sales");
 }
+let NOTES = {};
 async function loadProgress(){
-  PROGRESS = {};
-  const {data} = await sb.from("step_progress").select("*").eq("project_id", CURRENT_PROJECT.id);
-  (data||[]).forEach(r=>{ PROGRESS[r.step_no]=r; });
+  PROGRESS = {}; NOTES = {};
+  const [pRes, nRes] = await Promise.all([
+    sb.from("step_progress").select("*").eq("project_id", CURRENT_PROJECT.id),
+    sb.from("step_notes").select("*").eq("project_id", CURRENT_PROJECT.id),
+  ]);
+  (pRes.data||[]).forEach(r=>{ PROGRESS[r.step_no]=r; });
+  (nRes.data||[]).forEach(r=>{ NOTES[r.step_no]=r.note||""; });
 }
 function visibleLanes(){ return ROLE_LANES[CURRENT_USER.role] || []; }
 function buildLaneTabs(){
@@ -1181,6 +1179,8 @@ function renderTimeline(scrollToNext){
       body.appendChild(el("div","resources","Resources: "+s.resources.join(" · ")));
     }
 
+    const allowed = canActOnStep(s);
+
     if(s.type==="calculator"){
       const open = el("a","btn sm"); open.textContent="Open Solar Cost Calculator";
       open.href=CALC_URL; open.target="_blank"; open.rel="noopener";
@@ -1188,25 +1188,40 @@ function renderTimeline(scrollToNext){
       body.appendChild(open);
     }
     else if(s.type==="upload"){
-      renderUpload(body, s, prog, done);
+      renderUpload(body, s, prog, done, allowed);
     }
     else if(s.type==="download"){
       renderDownload(body, s, prog, done);
     }
 
-    // universal tick (every step)
+    // universal tick (every step) — only the responsible user can approve
     const row = el("label","check-row"); row.style.marginTop="12px";
     const cb = el("input"); cb.type="checkbox"; cb.checked=done;
-    cb.onchange=()=>toggleDone(s.no, cb.checked);
-    row.appendChild(cb);
-    row.appendChild(el("span","", done?"Completed":"Mark this step as done"));
+    if(allowed){
+      cb.onchange=()=>toggleDone(s.no, cb.checked);
+      row.appendChild(cb);
+      row.appendChild(el("span","", done?"Completed":"Mark this step as done"));
+    } else {
+      cb.disabled=true;
+      row.classList.add("locked");
+      row.appendChild(cb);
+      row.appendChild(el("span","", done
+        ? "Completed"
+        : "🔒 Only "+responsibleLabel(s)+" can approve this step"));
+    }
     body.appendChild(row);
 
     // universal notes (every step)
     const noteWrap = el("div","note-wrap");
-    const ta = el("textarea","note-input"); ta.placeholder="Add a note…"; ta.value = prog.note||"";
+    const ta = el("textarea","note-input"); ta.placeholder="Add a note…"; ta.value = NOTES[s.no]||"";
     const nb = el("button","btn ghost sm","Save note"); nb.style.marginTop="6px";
-    nb.onclick=async()=>{ const r=await upsertProgress(s.no,{note:ta.value}); if(r){ toast("Note saved"); renderTimeline(); } };
+    nb.onclick=async()=>{
+      const {error}=await sb.from("step_notes").upsert(
+        {project_id:CURRENT_PROJECT.id, step_no:s.no, note:ta.value, updated_by:CURRENT_USER.username},
+        {onConflict:"project_id,step_no"});
+      if(error){ toast("Note failed: "+error.message, true); return; }
+      NOTES[s.no]=ta.value; toast("Note saved"); renderTimeline();
+    };
     noteWrap.appendChild(ta); noteWrap.appendChild(nb);
     body.appendChild(noteWrap);
 
@@ -1220,45 +1235,86 @@ function renderTimeline(scrollToNext){
   if(scrollToNext && nextCard){ setTimeout(()=>{ try{nextCard.scrollIntoView({behavior:"smooth",block:"center"});}catch(e){} }, 150); }
 }
 
+/* who may approve/act on a step: the responsible lane only (sales lane = the
+   designated salesperson of this sale), admin can act on everything */
+function canActOnStep(s){
+  if(!CURRENT_USER) return false;
+  if(CURRENT_USER.role==="admin") return true;
+  const responsible = LANE_ROLE[s.lane];
+  if(CURRENT_USER.role!==responsible) return false;
+  if(s.lane==="sales") return CURRENT_PROJECT && CURRENT_PROJECT.created_by===CURRENT_USER.username;
+  return true; // account lane: any account user
+}
+function canActOnStepNo(no){ const st=STEPS.find(x=>x.no===no); return st?canActOnStep(st):false; }
+function responsibleLabel(s){
+  if(s.lane==="sales") return CURRENT_PROJECT && CURRENT_PROJECT.created_by ? escapeHtml(CURRENT_PROJECT.created_by)+" (assigned salesperson)" : "the assigned salesperson";
+  return LANE_LABEL[s.lane]+" team";
+}
+
 function downloadUrl(url, name){
   if(!url) return url;
   return url + (url.includes("?") ? "&" : "?") + "download=" + encodeURIComponent(name||"");
 }
-function renderUpload(body, s, prog, done){
+/* private bucket: new uploads store a PATH; legacy rows hold full public URLs.
+   This resolves either into a working (signed) link asynchronously. */
+function fileHref(aEl, stored, name, asDownload){
+  if(!stored){ aEl.removeAttribute("href"); return; }
+  if(/^https?:/i.test(stored)){ aEl.href = asDownload ? downloadUrl(stored, name) : stored; return; }
+  aEl.href = "javascript:void(0)";
+  sb.storage.from(BUCKET).createSignedUrl(stored, 3600, asDownload ? {download: name||true} : undefined)
+    .then(({data})=>{ if(data && data.signedUrl) aEl.href = data.signedUrl; })
+    .catch(()=>{});
+}
+function fileSrc(imgEl, stored){
+  if(!stored) return;
+  if(/^https?:/i.test(stored)){ imgEl.src = stored; return; }
+  sb.storage.from(BUCKET).createSignedUrl(stored, 3600)
+    .then(({data})=>{ if(data && data.signedUrl) imgEl.src = data.signedUrl; })
+    .catch(()=>{});
+}
+function renderUpload(body, s, prog, done, allowed){
   if(prog.file_url){
     const row = el("div","file-row");
-    const a = el("a","file-tag"); a.href=prog.file_url; a.target="_blank"; a.rel="noopener";
+    const a = el("a","file-tag"); a.target="_blank"; a.rel="noopener";
     a.innerHTML = "📎 "+escapeHtml(prog.file_name||"View file");
+    fileHref(a, prog.file_url, prog.file_name, false);
     row.appendChild(a);
-    const dl = el("a","file-tag"); dl.href=downloadUrl(prog.file_url, prog.file_name);
+    const dl = el("a","file-tag");
     dl.innerHTML = "⬇ Download";
+    fileHref(dl, prog.file_url, prog.file_name, true);
     row.appendChild(dl);
-    const repl = el("label","file-input-label"); repl.textContent="Replace file";
-    const inp = el("input"); inp.type="file"; inp.style.display="none";
-    inp.accept="image/*,application/pdf";
-    inp.onchange=e=>handleUpload(s.no, e.target.files[0]);
-    repl.appendChild(inp); row.appendChild(repl);
+    if(allowed){
+      const repl = el("label","file-input-label"); repl.textContent="Replace file";
+      const inp = el("input"); inp.type="file"; inp.style.display="none";
+      inp.accept="image/*,application/pdf";
+      inp.onchange=e=>handleUpload(s.no, e.target.files[0]);
+      repl.appendChild(inp); row.appendChild(repl);
+    }
     body.appendChild(row);
     if(/\.(png|jpe?g|gif|webp)$/i.test(prog.file_name||"")){
-      const pv=el("div","filepreview"); const im=el("img"); im.src=prog.file_url; pv.appendChild(im); body.appendChild(pv);
+      const pv=el("div","filepreview"); const im=el("img"); fileSrc(im, prog.file_url); pv.appendChild(im); body.appendChild(pv);
     }
-  } else {
+  } else if(allowed){
     const lbl = el("label","file-input-label"); lbl.textContent="Upload image / PDF";
     const inp = el("input"); inp.type="file"; inp.style.display="none";
     inp.accept="image/*,application/pdf";
     inp.onchange=e=>handleUpload(s.no, e.target.files[0]);
     lbl.appendChild(inp); body.appendChild(lbl);
+  } else {
+    body.appendChild(el("div","resources","Waiting for "+responsibleLabel(s)+" to upload the file."));
   }
 }
 function renderDownload(body, s, prog, done){
   const srcProg = PROGRESS[s.source];
   if(srcProg && srcProg.file_url){
     const row = el("div","file-row");
-    const a = el("a","file-tag"); a.href=downloadUrl(srcProg.file_url, srcProg.file_name); a.rel="noopener";
+    const a = el("a","file-tag"); a.rel="noopener";
     a.innerHTML="⬇ Download from Account: "+escapeHtml(srcProg.file_name||"handover file");
+    fileHref(a, srcProg.file_url, srcProg.file_name, true);
     row.appendChild(a);
-    const vw = el("a","file-tag"); vw.href=srcProg.file_url; vw.target="_blank"; vw.rel="noopener";
+    const vw = el("a","file-tag"); vw.target="_blank"; vw.rel="noopener";
     vw.innerHTML="📎 View";
+    fileHref(vw, srcProg.file_url, srcProg.file_name, false);
     row.appendChild(vw);
     body.appendChild(row);
   } else {
@@ -1279,17 +1335,15 @@ async function upsertProgress(step_no, patch){
   return data;
 }
 async function contractAllowsCommission(){
-  const who = CURRENT_PROJECT && CURRENT_PROJECT.created_by;
-  if(!who) return true;
-  try{
-    const {data} = await sb.from("users").select("role,contract_end").eq("username", who).limit(1);
-    const u=(data||[])[0];
-    if(!u || u.role!=="sales" || !u.contract_end) return true; // no contract set → not blocked
-    const today = new Date().toISOString().slice(0,10);
-    return today <= u.contract_end;
-  }catch(e){ return true; }
+  return true; // enforced server-side by the commission_gate trigger; errors surface via toast
 }
 async function toggleDone(step_no, val){
+  if(!canActOnStepNo(step_no)){
+    const st=STEPS.find(x=>x.no===step_no);
+    toast("Only "+(st?responsibleLabel(st):"the responsible user")+" can approve this step.", true);
+    renderTimeline();
+    return;
+  }
   if(val && step_no===FINAL_STEP){
     const ok = await contractAllowsCommission();
     if(!ok){
@@ -1305,16 +1359,18 @@ async function toggleDone(step_no, val){
 }
 async function handleUpload(step_no, file){
   if(!file) return;
+  if(!canActOnStepNo(step_no)){
+    const st=STEPS.find(x=>x.no===step_no);
+    toast("Only "+(st?responsibleLabel(st):"the responsible user")+" can upload for this step.", true);
+    return;
+  }
   if(file.size > 25*1024*1024){ toast("File too large (max 25MB).", true); return; }
   toast("Uploading…");
   const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g,"_");
   const path = `${CURRENT_PROJECT.id}/${step_no}_${Date.now()}_${safeName}`;
   const {error:upErr} = await sb.storage.from(BUCKET).upload(path, file, {upsert:true, contentType:file.type});
   if(upErr){ toast("Upload failed: "+upErr.message, true); return; }
-  const {data:pub} = sb.storage.from(BUCKET).getPublicUrl(path);
-  const alreadyDone = PROGRESS[step_no] && PROGRESS[step_no].done;
-  const patch = {done:true, file_url:pub.publicUrl, file_name:file.name};
-  if(!alreadyDone) patch.done_at = new Date().toISOString(); // keep original month if replacing a file
+  const patch = {done:true, file_url:path, file_name:file.name}; // store PATH; signed URLs at view time
   const r = await upsertProgress(step_no, patch);
   if(r){ toast("Uploaded & synced"); maybeNotifyNext(step_no); renderTimeline(true); }
 }
@@ -1345,8 +1401,7 @@ async function uploadContractFile(file, username){
   const path = `contracts/${username.replace(/[^a-zA-Z0-9_-]/g,"_")}_${Date.now()}_${safe}`;
   const {error} = await sb.storage.from(BUCKET).upload(path, file, {upsert:true, contentType:file.type||"application/pdf"});
   if(error) throw error;
-  const {data:pub} = sb.storage.from(BUCKET).getPublicUrl(path);
-  return {url:pub.publicUrl, name:file.name};
+  return {url:path, name:file.name}; // store PATH; signed URLs at view time
 }
 async function checkContracts(){
   if(!CURRENT_USER) return;
@@ -1354,20 +1409,17 @@ async function checkContracts(){
   const key = "voltek_contractalert_"+CURRENT_USER.username+"_"+today;
   if(safeStore.get(key)) return; // one reminder per day
   try{
-    if(CURRENT_USER.role==="admin"){
-      const {data} = await sb.from("users").select("username,contract_end").eq("role","sales").not("contract_end","is",null);
-      (data||[]).forEach(u=>{
-        const st=contractStatus(u);
-        if(st && st.cls==="expired") alertBanner(`📄 Contract for ${u.username} has EXPIRED (${u.contract_end}). Please renew.`);
-        else if(st && st.cls==="expiring") alertBanner(`📄 Contract for ${u.username} ends in ${st.days} day${st.days===1?"":"s"} (${u.contract_end}).`);
-      });
-    } else if(CURRENT_USER.role==="sales"){
-      const {data} = await sb.from("users").select("contract_end").eq("id",CURRENT_USER.id).limit(1);
-      const u=(data||[])[0];
+    const {data} = await sb.rpc("contract_alerts");
+    (data||[]).forEach(u=>{
       const st=contractStatus(u);
-      if(st && st.cls==="expired") alertBanner(`📄 Your contract has EXPIRED (${u.contract_end}). Please contact admin.`);
-      else if(st && st.cls==="expiring") alertBanner(`📄 Your contract ends in ${st.days} day${st.days===1?"":"s"} (${u.contract_end}).`);
-    }
+      const mine = CURRENT_USER.role==="sales";
+      if(st && st.cls==="expired") alertBanner(mine
+        ? `📄 Your contract has EXPIRED (${u.contract_end}). Please contact admin.`
+        : `📄 Contract for ${u.username} has EXPIRED (${u.contract_end}). Please renew.`);
+      else if(st && st.cls==="expiring") alertBanner(mine
+        ? `📄 Your contract ends in ${st.days} day${st.days===1?"":"s"} (${u.contract_end}).`
+        : `📄 Contract for ${u.username} ends in ${st.days} day${st.days===1?"":"s"} (${u.contract_end}).`);
+    });
     safeStore.set(key,"1");
   }catch(e){}
 }
@@ -1435,7 +1487,7 @@ function modal(title, bodyNode, footNode){
 }
 
 async function getSalesUsers(){
-  const {data} = await sb.from("users").select("username").eq("role","sales").order("username");
+  const {data} = await sb.from("profiles").select("username").eq("role","sales").order("username");
   return (data||[]).map(u=>u.username);
 }
 function salesSelectHtml(id, selected, includeSelf){
@@ -1491,8 +1543,8 @@ function settingsModal(){
   pwRow.innerHTML=`<div class="lbl">Change my password</div><div class="hint">Signed in as ${escapeHtml(CURRENT_USER.username)} (${CURRENT_USER.role}).</div>
     <div class="field"><input id="myNewPass" type="password" placeholder="New password"/></div>`;
   const pwBtn=el("button","btn sm","Update password");
-  pwBtn.onclick=async()=>{ const np=$("#myNewPass").value; if(np.length<4){toast("Use at least 4 characters",true);return;}
-    const hash=await sha256(np); const {error}=await sb.from("users").update({password_hash:hash}).eq("id",CURRENT_USER.id);
+  pwBtn.onclick=async()=>{ const np=$("#myNewPass").value; if(np.length<6){toast("Use at least 6 characters",true);return;}
+    const {error}=await sb.auth.updateUser({password:np});
     if(error){toast("Update failed: "+error.message,true);return;} $("#myNewPass").value=""; toast("Password updated"); };
   pwRow.appendChild(pwBtn);
   body.appendChild(pwRow);
@@ -1523,7 +1575,7 @@ function settingsModal(){
 
 async function loadMyContract(){
   const wrap=$("#myContractWrap"); if(!wrap) return;
-  const {data,error}=await sb.from("users").select("contract_url,contract_name,contract_start,contract_end").eq("id",CURRENT_USER.id).limit(1);
+  const {data,error}=await sb.rpc("my_contract");
   if(error){ wrap.innerHTML="<span style='color:#ff8d7a;font-size:12px'>Could not load contract.</span>"; return; }
   const u=(data||[])[0]||{};
   const st=contractStatus(u);
@@ -1535,9 +1587,11 @@ async function loadMyContract(){
   wrap.innerHTML = html || "";
   if(u.contract_url){
     const row=el("div","file-row");
-    const vw=el("a","file-tag"); vw.href=u.contract_url; vw.target="_blank"; vw.rel="noopener";
+    const vw=el("a","file-tag"); vw.target="_blank"; vw.rel="noopener";
     vw.innerHTML="📎 "+escapeHtml(u.contract_name||"Contract agreement");
-    const dl=el("a","file-tag"); dl.href=downloadUrl(u.contract_url,u.contract_name); dl.innerHTML="⬇ Download";
+    fileHref(vw, u.contract_url, u.contract_name, false);
+    const dl=el("a","file-tag"); dl.innerHTML="⬇ Download";
+    fileHref(dl, u.contract_url, u.contract_name, true);
     row.appendChild(vw); row.appendChild(dl);
     wrap.appendChild(row);
   } else if(!html){
@@ -1548,29 +1602,35 @@ async function loadMyContract(){
 async function loadUsersTable(){
   const wrap=$("#usersTableWrap"); if(!wrap) return;
   wrap.innerHTML="Loading…";
-  const {data,error}=await sb.from("users").select("*").order("created_at");
-  if(error){ wrap.innerHTML="<span style='color:#ff8d7a;font-size:12px'>Could not load users.</span>"; return; }
+  const {data,error}=await sb.rpc("admin_list_users");
+  if(error){ wrap.innerHTML="<span style='color:#ff8d7a;font-size:12px'>Could not load users. Deploy the secure setup first.</span>"; return; }
   const t=el("table","users");
   t.innerHTML="<tr><th>Username</th><th>Role</th><th>Contract</th><th></th></tr>";
   data.forEach(u=>{
     const tr=el("tr");
-    let contractCell="<span style='color:var(--muted)'>—</span>";
+    tr.innerHTML=`<td>${escapeHtml(u.username)}</td><td><span class="tag-role">${u.role}</span></td>`;
+    const tdC=el("td");
     if(u.role==="sales"){
       const st=contractStatus(u);
-      const links = u.contract_url
-        ? ` <a class="mini-link" href="${u.contract_url}" target="_blank" rel="noopener">📎</a> <a class="mini-link" href="${downloadUrl(u.contract_url,u.contract_name)}">⬇</a>`
-        : "";
-      contractCell = (st?`<span class="cbadge ${st.cls}">${st.label}</span>`:"<span style='color:var(--muted)'>None</span>")+links;
+      tdC.innerHTML = st?`<span class="cbadge ${st.cls}">${st.label}</span>`:"<span style='color:var(--muted)'>None</span>";
+      if(u.contract_url){
+        const vw=el("a","mini-link","📎"); vw.target="_blank"; vw.rel="noopener"; fileHref(vw,u.contract_url,u.contract_name,false);
+        const dl=el("a","mini-link","⬇"); fileHref(dl,u.contract_url,u.contract_name,true);
+        tdC.appendChild(document.createTextNode(" ")); tdC.appendChild(vw); tdC.appendChild(dl);
+      }
+    } else {
+      tdC.innerHTML="<span style='color:var(--muted)'>—</span>";
     }
-    tr.innerHTML=`<td>${escapeHtml(u.username)}</td><td><span class="tag-role">${u.role}</span></td><td>${contractCell}</td>`;
+    tr.appendChild(tdC);
     const td=el("td"); td.style.textAlign="right";
     const edit=el("button","btn ghost sm","Edit"); edit.onclick=()=>userModal(u); edit.style.marginRight="6px";
     td.appendChild(edit);
     if(u.id!==CURRENT_USER.id){
       const del=el("button","btn danger sm","Delete");
       del.onclick=async()=>{ if(!confirm("Delete user "+u.username+"?"))return;
-        const {error}=await sb.from("users").delete().eq("id",u.id);
-        if(error){toast("Delete failed: "+error.message,true);return;} toast("User deleted"); loadUsersTable(); };
+        const {data,error}=await sb.functions.invoke("admin-users",{body:{action:"delete", id:u.id}});
+        if(error || (data&&data.error)){toast("Delete failed: "+((data&&data.error)||error.message),true);return;}
+        toast("User deleted"); loadUsersTable(); };
       td.appendChild(del);
     }
     tr.appendChild(td); t.appendChild(tr);
@@ -1613,30 +1673,26 @@ function userModal(existing){
   save.onclick=async()=>{
     const username=$("#umUser").value.trim(); const role=$("#umRole").value; const pass=$("#umPass").value;
     if(!username){toast("Enter a username",true);return;}
-    const patch={username, role};
+    const payload={action: existing?"update":"create", username, role};
+    if(existing) payload.id=existing.id;
+    if(pass){ if(pass.length<6){toast("Password: at least 6 characters",true);return;} payload.password=pass; }
+    if(!existing && !pass){ toast("Password is required",true); return; }
     if(role==="sales"){
       const start=$("#umStart").value, end=$("#umEnd").value;
       if(start && end && end<start){ toast("Contract end must be after start",true); return; }
-      patch.contract_start = start||null;
-      patch.contract_end   = end||null;
+      payload.contract_start = start||null;
+      payload.contract_end   = end||null;
       const f = $("#umContractFile").files[0];
       if(f){
         if(f.type && f.type!=="application/pdf" && !/\.pdf$/i.test(f.name)){ toast("Contract must be a PDF",true); return; }
         toast("Uploading contract…");
-        try{ const up=await uploadContractFile(f, username); patch.contract_url=up.url; patch.contract_name=up.name; }
+        try{ const up=await uploadContractFile(f, username); payload.contract_url=up.url; payload.contract_name=up.name; }
         catch(e){ toast("Contract upload failed: "+e.message,true); return; }
       }
     }
-    if(existing){
-      if(pass) patch.password_hash=await sha256(pass);
-      const {error}=await sb.from("users").update(patch).eq("id",existing.id);
-      if(error){toast("Save failed: "+error.message,true);return;} toast("User updated");
-    } else {
-      if(pass.length<4){toast("Password: at least 4 characters",true);return;}
-      patch.password_hash=await sha256(pass);
-      const {error}=await sb.from("users").insert(patch);
-      if(error){toast("Create failed: "+error.message,true);return;} toast("User created");
-    }
+    const {data, error} = await sb.functions.invoke("admin-users", {body: payload});
+    if(error || (data && data.error)){ toast("Save failed: "+((data&&data.error)||error.message), true); return; }
+    toast(existing?"User updated":"User created");
     settingsModal();
   };
 }
@@ -1788,9 +1844,13 @@ $("#deleteSaleBtn").onclick=deleteSale;
 
 /* ============ RESUME SESSION ============ */
 pwToggle($("#loginPass"));
-(function(){
-  const s=safeStore.get("voltek_session");
-  if(s){ try{ CURRENT_USER=JSON.parse(s); enterApp(); }catch(e){} }
+(async function(){
+  try{
+    const {data:{session}} = await sb.auth.getSession();
+    if(!session) return;
+    const prof = await sb.from("profiles").select("id,username,role").eq("id", session.user.id).single();
+    if(prof.data){ CURRENT_USER={id:prof.data.id, username:prof.data.username, role:prof.data.role}; enterApp(); }
+  }catch(e){}
 })();
 
 /* ============ PWA SERVICE WORKER ============ */
